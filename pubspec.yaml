@@ -8,13 +8,27 @@ version: 0.1.0+1
 environment:
   sdk: ^3.13.7
 
+
 dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
   just_audio: ^0.10.6
   file_picker: ^10.3.7
-  audio_metadata_reader: ^1.8.1 # Pure Dart metadata & cover art reader!
+  audio_metadata_reader: ^1.8.1
+
+  # Playback and background media controls
+  audio_service: ^0.18.18
+  just_audio_background: ^0.0.1-beta.17
+
+  # Desktop audio backend
+  just_audio_media_kit: ^2.1.0
+  media_kit_libs_linux: ^1.2.1
+  media_kit_libs_windows_audio: ^1.0.9
+
+  # Save playback state and preferences
+  shared_preferences: ^2.5.3
+
 
 
 dev_dependencies:
