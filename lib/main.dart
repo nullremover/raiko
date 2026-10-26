@@ -110,7 +110,7 @@ class _RaikoHomeState extends State<RaikoHome> {
     };
   }
 
-  Future<void> _importMusic() async {
+    Future<void> _importMusic() async {
     if (_importing) return;
 
     setState(() {
@@ -120,7 +120,8 @@ class _RaikoHomeState extends State<RaikoHome> {
 
     try {
       final result = await FilePicker.platform.pickFiles(
-        type: FileType.audio,
+        type: FileType.custom,
+        allowedExtensions: ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac', 'aiff', 'aif'],
         allowMultiple: true,
         withData: true,
       );
@@ -162,10 +163,13 @@ class _RaikoHomeState extends State<RaikoHome> {
         return AudioSource.uri(uri);
       }).toList();
 
+      // Wrap in a ConcatenatingAudioSource for playlists!
+      final playlist = ConcatenatingAudioSource(children: sources);
+
       final startIndex = oldCount < _tracks.length ? oldCount : 0;
 
-      await _player.setAudioSources(
-        sources,
+      await _player.setAudioSource(
+        playlist,
         initialIndex: startIndex,
         initialPosition: Duration.zero,
       );
@@ -189,6 +193,7 @@ class _RaikoHomeState extends State<RaikoHome> {
       }
     }
   }
+
 
   Future<void> _playTrack(int index) async {
     try {
