@@ -1,4 +1,5 @@
-
+import 'dart:io';
+import 'package:audiotags/audiotags.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -51,11 +52,14 @@ class _RaikoHomeState extends State<RaikoHome> {
   final AudioPlayer _player = AudioPlayer();
   final List<PlatformFile> _tracks = [];
   final Set<String> _likedTracks = {};
+  final Map<String, Tag> _trackMetadata = {};
 
   int _selectedTab = 0;
   bool _queueLoaded = false;
   bool _importing = false;
   String? _errorMessage;
+
+  static const _allowedExtensions = ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac', 'aiff', 'aif'];
 
   static const _tabs = [
     'Home',
@@ -82,9 +86,21 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 
   String _trackTitle(PlatformFile track) {
+    final tag = _trackMetadata[track.name];
+    if (tag != null && tag.title != null && tag.title!.isNotEmpty) {
+      return tag.title!;
+    }
     final name = track.name;
     final dot = name.lastIndexOf('.');
     return dot > 0 ? name.substring(0, dot) : name;
+  }
+
+  String _trackArtist(PlatformFile track) {
+    final tag = _trackMetadata[track.name];
+    if (tag != null && tag.artist != null && tag.artist!.isNotEmpty) {
+      return tag.artist!;
+    }
+    return 'Local file';
   }
 
   String _formatDuration(Duration? duration) {
@@ -110,8 +126,32 @@ class _RaikoHomeState extends State<RaikoHome> {
     };
   }
 
-      Future<void> _importMusic() async {
+  Future<void> _importMusic() async {
     if (_importing) return;
+
+    // Show a gorgeous dialog letting the user choose between Files or Folder (Mish style!)
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RaikoColors.panel,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Add Music', style: TextStyle(fontFamily: 'DelaGothicOne', fontSize: 20)),
+        content: const Text('Would you like to import individual audio files or a whole folder?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'files'),
+            child: const Text('Files', style: TextStyle(color: RaikoColors.starlight)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'folder'),
+            style: FilledButton.styleFrom(backgroundColor: RaikoColors.cobalt),
+            child: const Text('Folder'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == null) return;
 
     setState(() {
       _importing = true;
@@ -119,34 +159,76 @@ class _RaikoHomeState extends State<RaikoHome> {
     });
 
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac', 'aiff', 'aif'],
-        allowMultiple: true,
-        withData: true,
-      );
+      final List<PlatformFile> collectedFiles = [];
 
-      if (result == null || result.files.isEmpty) return;
+      if (choice == 'files') {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: _allowedExtensions,
+          allowMultiple: true,
+          withData: true,
+        );
 
-      final incoming = result.files.where((file) {
-        return kIsWeb ? file.bytes != null : file.path != null;
-      }).toList();
+        if (result != null && result.files.isNotEmpty) {
+          collectedFiles.addAll(result.files.where((file) {
+            return kIsWeb ? file.bytes != null : file.path != null;
+          }));
+        }
+      } else if (choice == 'folder') {
+        if (kIsWeb) {
+          throw Exception('Folder picking is not supported on the web.');
+        }
 
-      if (incoming.isEmpty) {
-        throw Exception('Raiko could not access those files.');
+        final directoryPath = await FilePicker.platform.getDirectoryPath();
+        if (directoryPath != null) {
+          final directory = Directory(directoryPath);
+          final entities = directory.listSync(recursive: true);
+
+          for (final entity in entities) {
+            if (entity is File) {
+              final path = entity.path;
+              final extension = path.split('.').last.toLowerCase();
+              if (_allowedExtensions.contains(extension)) {
+                final name = path.split(Platform.pathSeparator).last;
+                final bytes = await entity.readAsBytes();
+                collectedFiles.add(
+                  PlatformFile(
+                    name: name,
+                    path: path,
+                    size: bytes.length,
+                    bytes: bytes,
+                  ),
+                );
+              }
+            }
+          }
+        }
       }
+
+      if (collectedFiles.isEmpty) return;
 
       final oldCount = _tracks.length;
 
       setState(() {
-        for (final file in incoming) {
+        for (final file in collectedFiles) {
           final alreadyAdded = _tracks.any(
-            (track) =>
-                track.name == file.name &&
-                track.path == file.path,
+            (track) => track.name == file.name && track.path == file.path,
           );
 
-          if (!alreadyAdded) _tracks.add(file);
+          if (!alreadyAdded) {
+            _tracks.add(file);
+
+            // Extract metadata asynchronously
+            if (!kIsWeb && file.path != null) {
+              Audiotags.readAudioTag(file.path!).then((tag) {
+                if (tag != null && mounted) {
+                  setState(() {
+                    _trackMetadata[file.name] = tag;
+                  });
+                }
+              }).catchError((_) {});
+            }
+          }
         }
       });
 
@@ -165,7 +247,6 @@ class _RaikoHomeState extends State<RaikoHome> {
 
       final startIndex = oldCount < _tracks.length ? oldCount : 0;
 
-      // Use the modern setAudioSources method directly!
       await _player.setAudioSources(
         sources,
         initialIndex: startIndex,
@@ -294,8 +375,7 @@ class _RaikoHomeState extends State<RaikoHome> {
               ),
             ],
           ),
-          bottomNavigationBar:
-              desktop ? null : _buildBottomNavigation(),
+          bottomNavigationBar: desktop ? null : _buildBottomNavigation(),
         );
       },
     );
@@ -332,8 +412,7 @@ class _RaikoHomeState extends State<RaikoHome> {
                 ),
               ),
             ),
-            for (var i = 0; i < _tabs.length; i++)
-              _navItem(i),
+            for (var i = 0; i < _tabs.length; i++) _navItem(i),
             const Spacer(),
             const Padding(
               padding: EdgeInsets.all(24),
@@ -368,16 +447,13 @@ class _RaikoHomeState extends State<RaikoHome> {
           selectedTileColor: Colors.transparent,
           leading: Icon(
             _tabIcon(index),
-            color: selected
-                ? RaikoColors.starlight
-                : RaikoColors.muted,
+            color: selected ? RaikoColors.starlight : RaikoColors.muted,
           ),
           title: Text(
             _tabs[index],
             style: TextStyle(
               color: selected ? RaikoColors.text : RaikoColors.muted,
-              fontWeight:
-                  selected ? FontWeight.w600 : FontWeight.normal,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
             ),
           ),
           onTap: () => setState(() => _selectedTab = index),
@@ -493,9 +569,7 @@ class _RaikoHomeState extends State<RaikoHome> {
           ],
         ),
         const SizedBox(height: 8),
-        _tracks.isEmpty
-            ? _buildEmptyLibrary()
-            : _buildTrackList(compact: true),
+        _tracks.isEmpty ? _buildEmptyLibrary() : _buildTrackList(compact: true),
       ],
     );
   }
@@ -664,10 +738,7 @@ class _RaikoHomeState extends State<RaikoHome> {
           ),
         ],
         const SizedBox(height: 18),
-        if (_tracks.isEmpty)
-          _buildEmptyLibrary()
-        else
-          _buildTrackList(),
+        if (_tracks.isEmpty) _buildEmptyLibrary() else _buildTrackList(),
       ],
     );
   }
@@ -712,10 +783,12 @@ class _RaikoHomeState extends State<RaikoHome> {
                       overflow: TextOverflow.ellipsis,
                     ),
                     subtitle: Text(
-                      _tracks[i].name.split('.').last.toUpperCase(),
+                      _trackArtist(_tracks[i]),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: RaikoColors.muted,
-                        fontSize: 10,
+                        fontSize: 12,
                       ),
                     ),
                     trailing: compact
@@ -796,9 +869,7 @@ class _RaikoHomeState extends State<RaikoHome> {
               ),
               child: Center(
                 child: Icon(
-                  hasTrack
-                      ? Icons.graphic_eq_rounded
-                      : Icons.album_rounded,
+                  hasTrack ? Icons.graphic_eq_rounded : Icons.album_rounded,
                   size: 82,
                   color: RaikoColors.starlight,
                 ),
@@ -817,7 +888,7 @@ class _RaikoHomeState extends State<RaikoHome> {
             ),
             const SizedBox(height: 6),
             Text(
-              hasTrack ? 'Local file' : 'Pick a song from Library',
+              hasTrack ? _trackArtist(track) : 'Pick a song from Library',
               style: const TextStyle(color: RaikoColors.muted),
             ),
             const SizedBox(height: 20),
@@ -890,8 +961,7 @@ class _RaikoHomeState extends State<RaikoHome> {
                     hasTrack && _likedTracks.contains(track.name)
                         ? Icons.favorite_rounded
                         : Icons.favorite_border_rounded,
-                    color: hasTrack &&
-                            _likedTracks.contains(track.name)
+                    color: hasTrack && _likedTracks.contains(track.name)
                         ? RaikoColors.starlight
                         : RaikoColors.muted,
                   ),
@@ -928,8 +998,8 @@ class _RaikoHomeState extends State<RaikoHome> {
           builder: (context, positionSnapshot) {
             final position = positionSnapshot.data ?? Duration.zero;
             final maxMs = duration.inMilliseconds;
-            final currentMs = position.inMilliseconds
-                .clamp(0, maxMs > 0 ? maxMs : 1);
+            final currentMs =
+                position.inMilliseconds.clamp(0, maxMs > 0 ? maxMs : 1);
 
             return Column(
               children: [
@@ -994,10 +1064,7 @@ class _RaikoHomeState extends State<RaikoHome> {
           style: TextStyle(color: RaikoColors.muted),
         ),
         const SizedBox(height: 22),
-        if (_tracks.isEmpty)
-          _buildEmptyLibrary()
-        else
-          _buildTrackList(),
+        if (_tracks.isEmpty) _buildEmptyLibrary() else _buildTrackList(),
       ],
     );
   }
@@ -1116,9 +1183,7 @@ class _RaikoHomeState extends State<RaikoHome> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        track == null
-                            ? 'Nothing playing'
-                            : _trackTitle(track),
+                        track == null ? 'Nothing playing' : _trackTitle(track),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -1126,9 +1191,11 @@ class _RaikoHomeState extends State<RaikoHome> {
                         ),
                       ),
                       const SizedBox(height: 4),
-                      const Text(
-                        'raiko',
-                        style: TextStyle(
+                      Text(
+                        track == null ? 'raiko' : _trackArtist(track),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
                           color: RaikoColors.muted,
                           fontSize: 12,
                         ),
@@ -1141,9 +1208,7 @@ class _RaikoHomeState extends State<RaikoHome> {
                 stream: _player.playerStateStream,
                 builder: (context, snapshot) {
                   return IconButton(
-                    tooltip: snapshot.data?.playing == true
-                        ? 'Pause'
-                        : 'Play',
+                    tooltip: snapshot.data?.playing == true ? 'Pause' : 'Play',
                     onPressed: _togglePlayback,
                     icon: Icon(
                       snapshot.data?.playing == true
