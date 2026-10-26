@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'package:audiotags/audiotags.dart';
+import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -52,7 +52,7 @@ class _RaikoHomeState extends State<RaikoHome> {
   final AudioPlayer _player = AudioPlayer();
   final List<PlatformFile> _tracks = [];
   final Set<String> _likedTracks = {};
-  final Map<String, Tag> _trackMetadata = {};
+  final Map<String, SongMetadata> _trackMetadata = {};
 
   int _selectedTab = 0;
   bool _queueLoaded = false;
@@ -86,9 +86,9 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 
   String _trackTitle(PlatformFile track) {
-    final tag = _trackMetadata[track.name];
-    if (tag != null && tag.title != null && tag.title!.isNotEmpty) {
-      return tag.title!;
+    final metadata = _trackMetadata[track.name];
+    if (metadata != null && metadata.title != null && metadata.title!.isNotEmpty) {
+      return metadata.title!;
     }
     final name = track.name;
     final dot = name.lastIndexOf('.');
@@ -96,13 +96,12 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 
   String _trackArtist(PlatformFile track) {
-    final tag = _trackMetadata[track.name];
-    if (tag != null && tag.trackArtist != null && tag.trackArtist!.isNotEmpty) {
-      return tag.trackArtist!;
+    final metadata = _trackMetadata[track.name];
+    if (metadata != null && metadata.artist != null && metadata.artist!.isNotEmpty) {
+      return metadata.artist!;
     }
     return 'Local file';
   }
-
 
   String _formatDuration(Duration? duration) {
     if (duration == null) return '--:--';
@@ -130,7 +129,6 @@ class _RaikoHomeState extends State<RaikoHome> {
   Future<void> _importMusic() async {
     if (_importing) return;
 
-    // Show a gorgeous dialog letting the user choose between Files or Folder (Mish style!)
     final choice = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -219,15 +217,16 @@ class _RaikoHomeState extends State<RaikoHome> {
           if (!alreadyAdded) {
             _tracks.add(file);
 
-          // Extract metadata asynchronously
+            // Extract metadata & album art safely using pure Dart!
             if (!kIsWeb && file.path != null) {
-              AudioTags.read(file.path!).then((tag) {
-                if (tag != null && mounted) {
+              try {
+                final metadata = readMetadata(File(file.path!));
+                if (mounted) {
                   setState(() {
-                    _trackMetadata[file.name] = tag;
+                    _trackMetadata[file.name] = metadata;
                   });
                 }
-              }).catchError((_) {});
+              } catch (_) {}
             }
           }
         }
@@ -868,12 +867,26 @@ class _RaikoHomeState extends State<RaikoHome> {
                   ),
                 ],
               ),
-              child: Center(
-                child: Icon(
-                  hasTrack ? Icons.graphic_eq_rounded : Icons.album_rounded,
-                  size: 82,
-                  color: RaikoColors.starlight,
-                ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(26),
+                child: (() {
+                  if (track != null) {
+                    final metadata = _trackMetadata[track.name];
+                    if (metadata != null && metadata.pictures.isNotEmpty) {
+                      return Image.memory(
+                        metadata.pictures.first.bytes,
+                        fit: BoxFit.cover,
+                      );
+                    }
+                  }
+                  return Center(
+                    child: Icon(
+                      hasTrack ? Icons.graphic_eq_rounded : Icons.album_rounded,
+                      size: 82,
+                      color: RaikoColors.starlight,
+                    ),
+                  );
+                })(),
               ),
             ),
             const SizedBox(height: 24),
