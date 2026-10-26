@@ -234,7 +234,10 @@ class _RaikoHomeState extends State<RaikoHome> {
 
             if (!kIsWeb && file.path != null) {
               try {
-                final metadata = readMetadata(File(file.path!));
+                final metadata = readMetadata(
+								  File(file.path!),
+								  getImage: true,
+								);
                 if (mounted) {
                   setState(() {
                     _trackMetadata[file.name] = metadata;
