@@ -52,7 +52,7 @@ class _RaikoHomeState extends State<RaikoHome> {
   final AudioPlayer _player = AudioPlayer();
   final List<PlatformFile> _tracks = [];
   final Set<String> _likedTracks = {};
-  final Map<String, SongMetadata> _trackMetadata = {};
+  final Map<String, AudioMetadata> _trackMetadata = {};
 
   int _selectedTab = 0;
   bool _queueLoaded = false;
