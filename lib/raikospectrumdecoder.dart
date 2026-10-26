@@ -72,12 +72,15 @@ abstract final class RaikoSpectrumDecoder {
 
     // Group frequency bins into logarithmically spaced bands.
     for (var band = 0; band < barCount; band++) {
-      final start = (
-        math.pow(
-          nyquistBin.toDouble(),
-          band / barCount,
-        ),
-      ).floor().clamp(1, nyquistBin - 1);
+    final start = math
+          .pow(
+            nyquistBin.toDouble(),
+            band / barCount,
+          )
+          .toDouble()
+          .floor()
+          .clamp(1, nyquistBin - 1);
+
 
       final end = math
           .pow(
