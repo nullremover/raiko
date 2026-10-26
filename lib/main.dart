@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:audio_metadata_reader/audio_metadata_reader.dart';
-import 'package:audio_service/audio_service.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
