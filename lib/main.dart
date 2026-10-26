@@ -1,5 +1,8 @@
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 
 void main() {
   runApp(const RaikoApp());
@@ -45,9 +48,14 @@ class RaikoHome extends StatefulWidget {
 }
 
 class _RaikoHomeState extends State<RaikoHome> {
+  final AudioPlayer _player = AudioPlayer();
+  final List<PlatformFile> _tracks = [];
+  final Set<String> _likedTracks = {};
+
   int _selectedTab = 0;
-  bool _isPlaying = false;
-  bool _liked = false;
+  bool _queueLoaded = false;
+  bool _importing = false;
+  String? _errorMessage;
 
   static const _tabs = [
     'Home',
@@ -57,14 +65,199 @@ class _RaikoHomeState extends State<RaikoHome> {
     'About',
   ];
 
-  IconData _tabIcon(int index) {
-    return switch (index) {
-      0 => Icons.home_rounded,
-      1 => Icons.library_music_rounded,
-      2 => Icons.album_rounded,
-      3 => Icons.queue_music_rounded,
-      _ => Icons.info_outline_rounded,
+  IconData _tabIcon(int index) => switch (index) {
+        0 => Icons.grid_view_rounded,
+        1 => Icons.library_music_rounded,
+        2 => Icons.graphic_eq_rounded,
+        3 => Icons.queue_music_rounded,
+        _ => Icons.info_outline_rounded,
+      };
+
+  PlatformFile? get _currentTrack {
+    final index = _player.currentIndex;
+    if (index == null || index < 0 || index >= _tracks.length) {
+      return null;
+    }
+    return _tracks[index];
+  }
+
+  String _trackTitle(PlatformFile track) {
+    final name = track.name;
+    final dot = name.lastIndexOf('.');
+    return dot > 0 ? name.substring(0, dot) : name;
+  }
+
+  String _formatDuration(Duration? duration) {
+    if (duration == null) return '--:--';
+
+    final minutes = duration.inMinutes;
+    final seconds = duration.inSeconds.remainder(60);
+
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  String _mimeType(String name) {
+    final extension = name.split('.').last.toLowerCase();
+
+    return switch (extension) {
+      'mp3' => 'audio/mpeg',
+      'm4a' || 'aac' => 'audio/mp4',
+      'wav' => 'audio/wav',
+      'ogg' => 'audio/ogg',
+      'flac' => 'audio/flac',
+      'aif' || 'aiff' => 'audio/aiff',
+      _ => 'application/octet-stream',
     };
+  }
+
+  Future<void> _importMusic() async {
+    if (_importing) return;
+
+    setState(() {
+      _importing = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.audio,
+        allowMultiple: true,
+        withData: true,
+      );
+
+      if (result == null || result.files.isEmpty) return;
+
+      final incoming = result.files.where((file) {
+        return kIsWeb ? file.bytes != null : file.path != null;
+      }).toList();
+
+      if (incoming.isEmpty) {
+        throw Exception('Raiko could not access those files.');
+      }
+
+      final oldCount = _tracks.length;
+
+      setState(() {
+        for (final file in incoming) {
+          final alreadyAdded = _tracks.any(
+            (track) =>
+                track.name == file.name &&
+                track.path == file.path,
+          );
+
+          if (!alreadyAdded) _tracks.add(file);
+        }
+      });
+
+      if (_tracks.isEmpty) return;
+
+      final sources = _tracks.map((track) {
+        final uri = kIsWeb
+            ? Uri.dataFromBytes(
+                track.bytes!,
+                mimeType: _mimeType(track.name),
+              )
+            : Uri.file(track.path!);
+
+        return AudioSource.uri(uri);
+      }).toList();
+
+      final startIndex = oldCount < _tracks.length ? oldCount : 0;
+
+      await _player.setAudioSources(
+        sources,
+        initialIndex: startIndex,
+        initialPosition: Duration.zero,
+      );
+
+      _queueLoaded = true;
+
+      if (mounted) {
+        setState(() => _selectedTab = 2);
+      }
+
+      await _player.play();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Could not load music: $error';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _importing = false);
+      }
+    }
+  }
+
+  Future<void> _playTrack(int index) async {
+    try {
+      if (!_queueLoaded) return;
+
+      await _player.seek(Duration.zero, index: index);
+      await _player.play();
+
+      if (mounted) setState(() => _selectedTab = 2);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _errorMessage = 'Could not play this track: $error');
+      }
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    try {
+      if (!_queueLoaded || _tracks.isEmpty) {
+        await _importMusic();
+        return;
+      }
+
+      if (_player.playing) {
+        await _player.pause();
+      } else {
+        if (_player.processingState == ProcessingState.completed) {
+          await _player.seek(Duration.zero);
+        }
+        await _player.play();
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _errorMessage = 'Playback failed: $error');
+      }
+    }
+  }
+
+  Future<void> _nextTrack() async {
+    if (_player.hasNext) {
+      await _player.seekToNext();
+    }
+  }
+
+  Future<void> _previousTrack() async {
+    if (_player.position.inSeconds > 3) {
+      await _player.seek(Duration.zero);
+    } else if (_player.hasPrevious) {
+      await _player.seekToPrevious();
+    } else {
+      await _player.seek(Duration.zero);
+    }
+  }
+
+  void _toggleLike() {
+    final track = _currentTrack;
+    if (track == null) return;
+
+    setState(() {
+      if (!_likedTracks.add(track.name)) {
+        _likedTracks.remove(track.name);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    super.dispose();
   }
 
   @override
@@ -89,9 +282,7 @@ class _RaikoHomeState extends State<RaikoHome> {
                       child: Column(
                         children: [
                           _buildHeader(),
-                          Expanded(
-                            child: _buildPage(desktop),
-                          ),
+                          Expanded(child: _buildPage(desktop)),
                           _buildMiniPlayer(),
                         ],
                       ),
@@ -145,12 +336,11 @@ class _RaikoHomeState extends State<RaikoHome> {
             const Padding(
               padding: EdgeInsets.all(24),
               child: Text(
-                'YOUR MUSIC.\nYOUR UNIVERSE.',
+                'MUSIC IN MIND.',
                 style: TextStyle(
                   color: RaikoColors.muted,
-                  height: 1.7,
                   fontSize: 10,
-                  letterSpacing: 1.4,
+                  letterSpacing: 1.5,
                 ),
               ),
             ),
@@ -160,27 +350,20 @@ class _RaikoHomeState extends State<RaikoHome> {
     );
   }
 
-  
   Widget _navItem(int index) {
     final selected = _selectedTab == index;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 12,
-        vertical: 3,
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
       child: Material(
         color: selected
-            ? RaikoColors.cobalt.withValues(alpha: 0.2)
+            ? RaikoColors.cobalt.withValues(alpha: 0.22)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(14),
         clipBehavior: Clip.antiAlias,
         child: ListTile(
           selected: selected,
           selectedTileColor: Colors.transparent,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-          ),
           leading: Icon(
             _tabIcon(index),
             color: selected
@@ -190,12 +373,9 @@ class _RaikoHomeState extends State<RaikoHome> {
           title: Text(
             _tabs[index],
             style: TextStyle(
-              color: selected
-                  ? RaikoColors.text
-                  : RaikoColors.muted,
-              fontWeight: selected
-                  ? FontWeight.w600
-                  : FontWeight.normal,
+              color: selected ? RaikoColors.text : RaikoColors.muted,
+              fontWeight:
+                  selected ? FontWeight.w600 : FontWeight.normal,
             ),
           ),
           onTap: () => setState(() => _selectedTab = index),
@@ -203,7 +383,6 @@ class _RaikoHomeState extends State<RaikoHome> {
       ),
     );
   }
-
 
   Widget _buildHeader() {
     return Padding(
@@ -258,7 +437,7 @@ class _RaikoHomeState extends State<RaikoHome> {
       child: switch (_selectedTab) {
         0 => _buildHome(desktop),
         1 => _buildLibrary(),
-        2 => _buildNowPlaying(),
+        2 => _buildNowPlaying(desktop),
         3 => _buildQueue(),
         _ => _buildAbout(),
       },
@@ -269,45 +448,52 @@ class _RaikoHomeState extends State<RaikoHome> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'YOUR SOUND,',
-          style: TextStyle(
-            color: RaikoColors.starlight.withValues(alpha: 0.8),
-            fontSize: 12,
-            letterSpacing: 4,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 8),
         const Text(
-          'Beyond the ordinary.',
+          'GOOD TO HAVE YOU HERE',
           style: TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -1,
+            color: RaikoColors.starlight,
+            fontSize: 11,
+            letterSpacing: 2,
           ),
         ),
         const SizedBox(height: 10),
         const Text(
-          'A universe for the music that moves you.',
+          'raiko',
           style: TextStyle(
-            color: RaikoColors.muted,
-            fontSize: 14,
+            fontFamily: 'DelaGothicOne',
+            fontSize: 34,
           ),
         ),
-        const SizedBox(height: 30),
-        _buildFeaturedCard(desktop),
-        const SizedBox(height: 32),
+        const SizedBox(height: 8),
         const Text(
-          'YOUR LIBRARY',
-          style: TextStyle(
-            fontSize: 12,
-            letterSpacing: 2,
-            fontWeight: FontWeight.bold,
-          ),
+          'Break through the music.',
+          style: TextStyle(color: RaikoColors.muted),
         ),
-        const SizedBox(height: 12),
-        _buildEmptyLibrary(),
+        const SizedBox(height: 28),
+        _buildFeaturedCard(desktop),
+        const SizedBox(height: 28),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'YOUR LIBRARY',
+                style: TextStyle(
+                  fontSize: 12,
+                  letterSpacing: 2,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () => setState(() => _selectedTab = 1),
+              child: const Text('View all'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        _tracks.isEmpty
+            ? _buildEmptyLibrary()
+            : _buildTrackList(compact: true),
       ],
     );
   }
@@ -317,13 +503,13 @@ class _RaikoHomeState extends State<RaikoHome> {
       width: double.infinity,
       padding: const EdgeInsets.all(22),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(26),
+        borderRadius: BorderRadius.circular(24),
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            Color(0xFF192F6B),
-            Color(0xFF10172C),
+            Color(0xFF213D83),
+            Color(0xFF111A32),
             Color(0xFF11121C),
           ],
         ),
@@ -335,53 +521,60 @@ class _RaikoHomeState extends State<RaikoHome> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Icon(
-            Icons.auto_awesome_rounded,
+            Icons.graphic_eq_rounded,
             color: RaikoColors.starlight,
-            size: 24,
+            size: 28,
           ),
           const SizedBox(height: 18),
-          const Text(
-            'WELCOME TO RAIKO',
-            style: TextStyle(
-              fontSize: 11,
-              letterSpacing: 3,
+          Text(
+            _tracks.isEmpty ? 'NOTHING PLAYING' : 'IN YOUR LIBRARY',
+            style: const TextStyle(
+              fontSize: 10,
+              letterSpacing: 2,
               color: RaikoColors.starlight,
-              fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 10),
           Text(
-            'Your music.\nYour universe.',
+            _tracks.isEmpty ? 'Got music?' : 'Pick up where you left off.',
             style: TextStyle(
-              fontSize: desktop ? 34 : 29,
-              height: 1.15,
-              fontWeight: FontWeight.w700,
-              letterSpacing: -0.8,
+              fontSize: desktop ? 25 : 22,
+              fontWeight: FontWeight.w600,
             ),
           ),
-          const SizedBox(height: 12),
-          const Text(
-            'Start with your own collection. '
-            'More ways to discover music will come later.',
-            style: TextStyle(
+          const SizedBox(height: 10),
+          Text(
+            _tracks.isEmpty
+                ? 'Add the songs you already have.'
+                : '${_tracks.length} tracks in your library.',
+            style: const TextStyle(
               color: RaikoColors.muted,
-              height: 1.6,
+              height: 1.5,
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 22),
           FilledButton.icon(
-            onPressed: () => setState(() => _selectedTab = 1),
-            icon: const Icon(Icons.library_music_rounded),
-            label: const Text('Open your library'),
+            onPressed: _importing ? null : _importMusic,
+            icon: Icon(
+              _importing ? Icons.hourglass_top : Icons.add_rounded,
+            ),
+            label: Text(_importing ? 'Loading music…' : 'Add music'),
             style: FilledButton.styleFrom(
               backgroundColor: RaikoColors.cobalt,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(
                 horizontal: 18,
-                vertical: 15,
+                vertical: 14,
               ),
             ),
           ),
+          if (_errorMessage != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              _errorMessage!,
+              style: const TextStyle(color: Colors.orangeAccent),
+            ),
+          ],
         ],
       ),
     );
@@ -392,31 +585,31 @@ class _RaikoHomeState extends State<RaikoHome> {
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: RaikoColors.panel.withValues(alpha: 0.8),
+        color: RaikoColors.panel,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: Colors.white.withValues(alpha: 0.06),
         ),
       ),
-      child: const Row(
+      child: Row(
         children: [
-          Icon(
-            Icons.music_note_rounded,
+          const Icon(
+            Icons.library_music_outlined,
             color: RaikoColors.starlight,
             size: 30,
           ),
-          SizedBox(width: 14),
-          Expanded(
+          const SizedBox(width: 14),
+          const Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'A little quiet in here',
+                  'No music yet',
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
                 SizedBox(height: 5),
                 Text(
-                  'Your music library will live here.',
+                  'Add some songs to get started.',
                   style: TextStyle(
                     color: RaikoColors.muted,
                     fontSize: 12,
@@ -424,6 +617,12 @@ class _RaikoHomeState extends State<RaikoHome> {
                 ),
               ],
             ),
+          ),
+          IconButton(
+            tooltip: 'Add music',
+            onPressed: _importing ? null : _importMusic,
+            icon: const Icon(Icons.add_circle_outline_rounded),
+            color: RaikoColors.starlight,
           ),
         ],
       ),
@@ -437,139 +636,342 @@ class _RaikoHomeState extends State<RaikoHome> {
         const Text(
           'Library',
           style: TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.bold,
+            fontFamily: 'DelaGothicOne',
+            fontSize: 27,
           ),
         ),
-        const SizedBox(height: 10),
-        const Text(
-          'Your collection, on your terms.',
-          style: TextStyle(color: RaikoColors.muted),
+        const SizedBox(height: 8),
+        Text(
+          '${_tracks.length} ${_tracks.length == 1 ? 'track' : 'tracks'}',
+          style: const TextStyle(color: RaikoColors.muted),
         ),
-        const SizedBox(height: 28),
-        Container(
+        const SizedBox(height: 20),
+        SizedBox(
           width: double.infinity,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: RaikoColors.panel,
-            borderRadius: BorderRadius.circular(22),
-          ),
-          child: const Column(
-            children: [
-              Icon(
-                Icons.library_music_rounded,
-                size: 44,
-                color: RaikoColors.starlight,
-              ),
-              SizedBox(height: 14),
-              Text(
-                'No tracks yet',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              SizedBox(height: 8),
-              Text(
-                'Local music import is the next major feature.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: RaikoColors.muted,
-                  height: 1.5,
-                ),
-              ),
-            ],
+          child: OutlinedButton.icon(
+            onPressed: _importing ? null : _importMusic,
+            icon: const Icon(Icons.add_rounded),
+            label: Text(_importing ? 'Loading…' : 'Add music'),
           ),
         ),
+        if (_errorMessage != null) ...[
+          const SizedBox(height: 12),
+          Text(
+            _errorMessage!,
+            style: const TextStyle(color: Colors.orangeAccent),
+          ),
+        ],
+        const SizedBox(height: 18),
+        if (_tracks.isEmpty)
+          _buildEmptyLibrary()
+        else
+          _buildTrackList(),
       ],
     );
   }
 
-  Widget _buildNowPlaying() {
-    return Column(
-      children: [
-        const Text(
-          'NOW PLAYING',
-          style: TextStyle(
-            color: RaikoColors.starlight,
-            letterSpacing: 3,
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        const SizedBox(height: 28),
-        Container(
-          width: 240,
-          height: 240,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(28),
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Color(0xFF345FD1),
-                Color(0xFF10172D),
-                Color(0xFF05070D),
-              ],
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: RaikoColors.cobalt.withValues(alpha: 0.22),
-                blurRadius: 40,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: const Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.blur_on_rounded,
-                size: 76,
-                color: RaikoColors.starlight,
-              ),
-              SizedBox(height: 12),
-              Text(
-                'RAIKO',
-                style: TextStyle(
-                  letterSpacing: 8,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
+  Widget _buildTrackList({bool compact = false}) {
+    return StreamBuilder<int?>(
+      stream: _player.currentIndexStream,
+      builder: (context, snapshot) {
+        final currentIndex = snapshot.data;
+
+        return Column(
+          children: [
+            for (var i = 0; i < _tracks.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Material(
+                  color: currentIndex == i
+                      ? RaikoColors.cobalt.withValues(alpha: 0.17)
+                      : RaikoColors.panel.withValues(alpha: 0.72),
+                  borderRadius: BorderRadius.circular(14),
+                  child: ListTile(
+                    onTap: () => _playTrack(i),
+                    leading: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: currentIndex == i
+                            ? RaikoColors.cobalt
+                            : const Color(0xFF202941),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(
+                        currentIndex == i
+                            ? Icons.graphic_eq_rounded
+                            : Icons.music_note_rounded,
+                        color: RaikoColors.starlight,
+                      ),
+                    ),
+                    title: Text(
+                      _trackTitle(_tracks[i]),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      _tracks[i].name.split('.').last.toUpperCase(),
+                      style: const TextStyle(
+                        color: RaikoColors.muted,
+                        fontSize: 10,
+                      ),
+                    ),
+                    trailing: compact
+                        ? const Icon(
+                            Icons.play_arrow_rounded,
+                            color: RaikoColors.starlight,
+                          )
+                        : IconButton(
+                            tooltip: _likedTracks.contains(_tracks[i].name)
+                                ? 'Unlike'
+                                : 'Like',
+                            onPressed: () {
+                              setState(() {
+                                if (!_likedTracks.add(_tracks[i].name)) {
+                                  _likedTracks.remove(_tracks[i].name);
+                                }
+                              });
+                            },
+                            icon: Icon(
+                              _likedTracks.contains(_tracks[i].name)
+                                  ? Icons.favorite_rounded
+                                  : Icons.favorite_border_rounded,
+                              color: _likedTracks.contains(_tracks[i].name)
+                                  ? RaikoColors.starlight
+                                  : RaikoColors.muted,
+                            ),
+                          ),
+                  ),
                 ),
               ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildNowPlaying(bool desktop) {
+    return StreamBuilder<int?>(
+      stream: _player.currentIndexStream,
+      builder: (context, snapshot) {
+        final track = _currentTrack;
+        final hasTrack = track != null;
+
+        return Column(
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'NOW PLAYING',
+                style: TextStyle(
+                  color: RaikoColors.starlight.withValues(alpha: 0.9),
+                  letterSpacing: 2.5,
+                  fontSize: 10,
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Container(
+              width: desktop ? 290 : 240,
+              height: desktop ? 290 : 240,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(26),
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Color(0xFF345FD1),
+                    Color(0xFF17213D),
+                    Color(0xFF080A12),
+                  ],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: RaikoColors.cobalt.withValues(alpha: 0.2),
+                    blurRadius: 36,
+                  ),
+                ],
+              ),
+              child: Center(
+                child: Icon(
+                  hasTrack
+                      ? Icons.graphic_eq_rounded
+                      : Icons.album_rounded,
+                  size: 82,
+                  color: RaikoColors.starlight,
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              hasTrack ? _trackTitle(track) : 'Nothing playing',
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              hasTrack ? 'Local file' : 'Pick a song from Library',
+              style: const TextStyle(color: RaikoColors.muted),
+            ),
+            const SizedBox(height: 20),
+            _buildSeekBar(),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  tooltip: 'Previous track',
+                  onPressed: hasTrack ? _previousTrack : null,
+                  icon: const Icon(Icons.skip_previous_rounded),
+                  iconSize: 34,
+                ),
+                const SizedBox(width: 12),
+                StreamBuilder<PlayerState>(
+                  stream: _player.playerStateStream,
+                  builder: (context, snapshot) {
+                    final playing = snapshot.data?.playing ?? false;
+                    final loading = snapshot.data?.processingState ==
+                            ProcessingState.loading ||
+                        snapshot.data?.processingState ==
+                            ProcessingState.buffering;
+
+                    return IconButton.filled(
+                      tooltip: playing ? 'Pause' : 'Play',
+                      onPressed: _togglePlayback,
+                      icon: loading
+                          ? const SizedBox(
+                              width: 25,
+                              height: 25,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : Icon(
+                              playing
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                            ),
+                      iconSize: 34,
+                      style: IconButton.styleFrom(
+                        backgroundColor: RaikoColors.cobalt,
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size(68, 68),
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  tooltip: 'Next track',
+                  onPressed: hasTrack ? _nextTrack : null,
+                  icon: const Icon(Icons.skip_next_rounded),
+                  iconSize: 34,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  tooltip: _currentTrack != null &&
+                          _likedTracks.contains(_currentTrack!.name)
+                      ? 'Unlike'
+                      : 'Like',
+                  onPressed: hasTrack ? _toggleLike : null,
+                  icon: Icon(
+                    hasTrack && _likedTracks.contains(track.name)
+                        ? Icons.favorite_rounded
+                        : Icons.favorite_border_rounded,
+                    color: hasTrack &&
+                            _likedTracks.contains(track.name)
+                        ? RaikoColors.starlight
+                        : RaikoColors.muted,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => setState(() => _selectedTab = 3),
+                  icon: const Icon(Icons.queue_music_rounded),
+                  label: const Text('Queue'),
+                ),
+              ],
+            ),
+            if (_errorMessage != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _errorMessage!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.orangeAccent),
+              ),
             ],
-          ),
-        ),
-        const SizedBox(height: 28),
-        const Text(
-          'Nothing playing yet',
-          style: TextStyle(
-            fontSize: 23,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Your next favourite track starts here.',
-          style: TextStyle(color: RaikoColors.muted),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 24),
-        IconButton.filled(
-          onPressed: () => setState(() => _selectedTab = 1),
-          icon: const Icon(Icons.library_music_rounded),
-          iconSize: 30,
-          style: IconButton.styleFrom(
-            backgroundColor: RaikoColors.cobalt,
-            minimumSize: const Size(68, 68),
-          ),
-        ),
-        const SizedBox(height: 12),
-        const Text(
-          'Browse library',
-          style: TextStyle(color: RaikoColors.muted),
-        ),
-      ],
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildSeekBar() {
+    return StreamBuilder<Duration?>(
+      stream: _player.durationStream,
+      builder: (context, durationSnapshot) {
+        final duration = durationSnapshot.data ?? Duration.zero;
+
+        return StreamBuilder<Duration>(
+          stream: _player.positionStream,
+          builder: (context, positionSnapshot) {
+            final position = positionSnapshot.data ?? Duration.zero;
+            final maxMs = duration.inMilliseconds;
+            final currentMs = position.inMilliseconds
+                .clamp(0, maxMs > 0 ? maxMs : 1);
+
+            return Column(
+              children: [
+                Slider(
+                  min: 0,
+                  max: maxMs > 0 ? maxMs.toDouble() : 1,
+                  value: currentMs.toDouble(),
+                  onChanged: maxMs > 0
+                      ? (value) {
+                          _player.seek(
+                            Duration(milliseconds: value.round()),
+                          );
+                        }
+                      : null,
+                  activeColor: RaikoColors.starlight,
+                  inactiveColor: RaikoColors.panel,
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        _formatDuration(position),
+                        style: const TextStyle(
+                          color: RaikoColors.muted,
+                          fontSize: 11,
+                        ),
+                      ),
+                      Text(
+                        _formatDuration(duration),
+                        style: const TextStyle(
+                          color: RaikoColors.muted,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
@@ -580,30 +982,20 @@ class _RaikoHomeState extends State<RaikoHome> {
         const Text(
           'Up next',
           style: TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.bold,
+            fontFamily: 'DelaGothicOne',
+            fontSize: 26,
           ),
         ),
-        const SizedBox(height: 24),
-        const Center(
-          child: Column(
-            children: [
-              Icon(
-                Icons.queue_music_rounded,
-                size: 54,
-                color: RaikoColors.starlight,
-              ),
-              SizedBox(height: 12),
-              Text('Your queue is empty'),
-              SizedBox(height: 8),
-              Text(
-                'Tracks will appear here when you start listening.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: RaikoColors.muted),
-              ),
-            ],
-          ),
+        const SizedBox(height: 8),
+        const Text(
+          'Your listening queue.',
+          style: TextStyle(color: RaikoColors.muted),
         ),
+        const SizedBox(height: 22),
+        if (_tracks.isEmpty)
+          _buildEmptyLibrary()
+        else
+          _buildTrackList(),
       ],
     );
   }
@@ -613,28 +1005,66 @@ class _RaikoHomeState extends State<RaikoHome> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'About Raiko',
+          'About raiko',
           style: TextStyle(
-            fontSize: 30,
-            fontWeight: FontWeight.bold,
+            fontFamily: 'DelaGothicOne',
+            fontSize: 27,
           ),
         ),
-        SizedBox(height: 16),
+        SizedBox(height: 28),
+        _AboutQuestion(
+          question: 'hiii!! So what is… “Raiko?” And why should I use it?',
+          answer:
+              'Raiko is a free music app that aims to bring the same '
+              'features to EVERY platform. From mobile to PC!\n\n'
+              'The goal is to break through the music, wherever life '
+              'takes it (or you). ;)',
+        ),
+        SizedBox(height: 26),
+        _AboutQuestion(
+          question: 'Sounds tuff :) But what about it is really a selling point?',
+          answer:
+              'Well, it started out with Mish. mish is where I got my '
+              'chance to play around and make some… questionable design '
+              'choices.\n\n'
+              'Now, with this lean mean machine, we’ll have more room '
+              'to breathe, experiment, and recover.\n\n'
+              'Music, and more ideas. It’s a good mix.',
+        ),
+        SizedBox(height: 26),
+        _AboutQuestion(
+          question: 'And yes, it’s a work in progress.',
+          answer:
+              'Raiko is being built one step at a time (in fact, I use '
+              'my phone to type this into the code lolll).\n\n'
+              'There’s a lot more I want it to be, so we’re starting '
+              'somewhere good. With a little humanity.',
+        ),
+        SizedBox(height: 26),
         Text(
-          'A music player built around your collection, '
-          'your privacy, and your personal listening universe.',
+          'music in mind.',
+          style: TextStyle(
+            color: RaikoColors.starlight,
+            fontFamily: 'DelaGothicOne',
+            fontSize: 17,
+          ),
+        ),
+        SizedBox(height: 8),
+        Text(
+          'Designed as an alternative to the now-retired mish. '
+          'But it’ll be back. ;)',
           style: TextStyle(
             color: RaikoColors.muted,
-            height: 1.8,
+            height: 1.7,
           ),
         ),
-        SizedBox(height: 24),
+        SizedBox(height: 28),
         Text(
           'RAIKO • EARLY DEVELOPMENT',
           style: TextStyle(
             color: RaikoColors.starlight,
-            letterSpacing: 2,
-            fontSize: 11,
+            letterSpacing: 1.5,
+            fontSize: 10,
           ),
         ),
       ],
@@ -642,94 +1072,89 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 
   Widget _buildMiniPlayer() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      padding: const EdgeInsets.symmetric(
-        horizontal: 14,
-        vertical: 10,
-      ),
-      decoration: BoxDecoration(
-        color: const Color(0xFF151B2B),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: RaikoColors.starlight.withValues(alpha: 0.12),
-        ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              gradient: const LinearGradient(
-                colors: [
-                  RaikoColors.cobalt,
-                  Color(0xFF101522),
-                ],
+    return StreamBuilder<int?>(
+      stream: _player.currentIndexStream,
+      builder: (context, indexSnapshot) {
+        final track = _currentTrack;
+
+        return Container(
+          margin: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFF151B2B),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: RaikoColors.starlight.withValues(alpha: 0.14),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(11),
+                  gradient: const LinearGradient(
+                    colors: [
+                      RaikoColors.cobalt,
+                      Color(0xFF101522),
+                    ],
+                  ),
+                ),
+                child: const Icon(
+                  Icons.graphic_eq_rounded,
+                  color: RaikoColors.starlight,
+                ),
               ),
-            ),
-            child: const Icon(
-              Icons.album_rounded,
-              color: RaikoColors.starlight,
-            ),
-          ),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Nothing playing',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                SizedBox(height: 4),
-                Text(
-                  'Raiko player',
-                  style: TextStyle(
-                    color: RaikoColors.muted,
-                    fontSize: 12,
+              const SizedBox(width: 12),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() => _selectedTab = 2),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        track == null
+                            ? 'Nothing playing'
+                            : _trackTitle(track),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'raiko',
+                        style: TextStyle(
+                          color: RaikoColors.muted,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ),
+              ),
+              StreamBuilder<PlayerState>(
+                stream: _player.playerStateStream,
+                builder: (context, snapshot) {
+                  return IconButton(
+                    tooltip: snapshot.data?.playing == true
+                        ? 'Pause'
+                        : 'Play',
+                    onPressed: _togglePlayback,
+                    icon: Icon(
+                      snapshot.data?.playing == true
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                    ),
+                  );
+                },
+              ),
+            ],
           ),
-          IconButton(
-            tooltip: _isPlaying ? 'Pause' : 'Play',
-            onPressed: () {
-              setState(() => _isPlaying = !_isPlaying);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    _isPlaying
-                        ? 'Playback will be connected next.'
-                        : 'Playback paused.',
-                  ),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
-            },
-            icon: Icon(
-              _isPlaying
-                  ? Icons.pause_rounded
-                  : Icons.play_arrow_rounded,
-              color: RaikoColors.text,
-            ),
-          ),
-          IconButton(
-            tooltip: _liked ? 'Unlike' : 'Like',
-            onPressed: () => setState(() => _liked = !_liked),
-            icon: Icon(
-              _liked
-                  ? Icons.favorite_rounded
-                  : Icons.favorite_border_rounded,
-              color: _liked
-                  ? RaikoColors.starlight
-                  : RaikoColors.muted,
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -752,6 +1177,41 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 }
 
+class _AboutQuestion extends StatelessWidget {
+  const _AboutQuestion({
+    required this.question,
+    required this.answer,
+  });
+
+  final String question;
+  final String answer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          question,
+          style: const TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+            height: 1.4,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          answer,
+          style: const TextStyle(
+            color: RaikoColors.muted,
+            height: 1.8,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _RaikoLogo extends StatelessWidget {
   const _RaikoLogo();
 
@@ -761,17 +1221,16 @@ class _RaikoLogo extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(
-          Icons.blur_on_rounded,
+          Icons.graphic_eq_rounded,
           color: RaikoColors.starlight,
-          size: 28,
+          size: 27,
         ),
-        SizedBox(width: 8),
+        SizedBox(width: 9),
         Text(
           'raiko',
           style: TextStyle(
-            fontSize: 23,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -1,
+            fontFamily: 'DelaGothicOne',
+            fontSize: 22,
           ),
         ),
       ],
