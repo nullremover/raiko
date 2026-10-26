@@ -28,6 +28,7 @@ dependencies:
 
   # Save playback state and preferences
   shared_preferences: ^2.5.3
+  http: ^1.5.0
 
 
 
