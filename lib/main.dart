@@ -173,7 +173,7 @@ class _RaikoHomeState extends State<RaikoHome> {
             return kIsWeb ? file.bytes != null : file.path != null;
           }));
         }
-      } else if (choice == 'folder') {
+            } else if (choice == 'folder') {
         if (kIsWeb) {
           throw Exception('Folder picking is not supported on the web.');
         }
@@ -181,25 +181,33 @@ class _RaikoHomeState extends State<RaikoHome> {
         final directoryPath = await FilePicker.platform.getDirectoryPath();
         if (directoryPath != null) {
           final directory = Directory(directoryPath);
-          final entities = directory.listSync(recursive: true);
+          try {
+            final entities = directory.listSync(recursive: true);
 
-          for (final entity in entities) {
-            if (entity is File) {
-              final path = entity.path;
-              final extension = path.split('.').last.toLowerCase();
-              if (_allowedExtensions.contains(extension)) {
-                final name = path.split(Platform.pathSeparator).last;
-                final bytes = await entity.readAsBytes();
-                collectedFiles.add(
-                  PlatformFile(
-                    name: name,
-                    path: path,
-                    size: bytes.length,
-                    bytes: bytes,
-                  ),
-                );
+            for (final entity in entities) {
+              if (entity is File) {
+                try {
+                  final path = entity.path;
+                  final extension = path.split('.').last.toLowerCase();
+                  if (_allowedExtensions.contains(extension)) {
+                    final name = path.split(Platform.pathSeparator).last;
+                    final bytes = await entity.readAsBytes();
+                    collectedFiles.add(
+                      PlatformFile(
+                        name: name,
+                        path: path,
+                        size: bytes.length,
+                        bytes: bytes,
+                      ),
+                    );
+                  }
+                } catch (_) {
+                  // Skip individual files we lack permission to read
+                }
               }
             }
+          } catch (e) {
+            throw Exception('Cannot read folder (permission denied): $e');
           }
         }
       }
@@ -846,7 +854,7 @@ class _RaikoHomeState extends State<RaikoHome> {
               ),
             ),
             const SizedBox(height: 24),
-            Container(
+                        Container(
               width: desktop ? 290 : 240,
               height: desktop ? 290 : 240,
               decoration: BoxDecoration(
@@ -873,10 +881,17 @@ class _RaikoHomeState extends State<RaikoHome> {
                   if (track != null) {
                     final metadata = _trackMetadata[track.name];
                     if (metadata != null && metadata.pictures.isNotEmpty) {
-                      return Image.memory(
-                        metadata.pictures.first.bytes,
-                        fit: BoxFit.cover,
-                      );
+                      try {
+                        final picture = metadata.pictures.first;
+                        // audio_metadata_reader cover bytes can be accessed via .bytes
+                        final imageBytes = picture.bytes;
+                        if (imageBytes.isNotEmpty) {
+                          return Image.memory(
+                            imageBytes,
+                            fit: BoxFit.cover,
+                          );
+                        }
+                      } catch (_) {}
                     }
                   }
                   return Center(
