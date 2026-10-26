@@ -1,6 +1,6 @@
 
 name: raiko
-description: "Raiko, a cross-platform music player built with Flutter."
+description: "Raiko. Break through your music player. built with Flutter."
 publish_to: 'none'
 
 version: 0.1.0+1
@@ -20,7 +20,7 @@ dev_dependencies:
   icons_launcher: ^3.1.0
 
 icons_launcher:
-  image_path: "assets/icon/raiko-icon.png"
+  image_path: "assets/Icon/raiko-icon.png"
   platforms:
     android:
       enable: true
@@ -37,3 +37,9 @@ icons_launcher:
 
 flutter:
   uses-material-design: true
+
+  fonts:
+    - family: DelaGothicOne
+      fonts:
+        - asset: assets/fonts/delagothicone-regular.ttf
+
