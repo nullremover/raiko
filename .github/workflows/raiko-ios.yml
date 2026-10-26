@@ -39,23 +39,31 @@ jobs:
       - name: Build iOS IPA
         run: flutter build ipa --release --no-codesign
 
+      
       - name: Package unsigned IPA for SideStore
         run: |
           set -euo pipefail
 
-          IPA_PATH="build/ios/ipa"
+          APP_PATH="build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app"
 
-          echo "Looking for generated IPA..."
-          find "$IPA_PATH" -maxdepth 1 -name '*.ipa' -print
-
-          IPA_FILE="$(find "$IPA_PATH" -maxdepth 1 -name '*.ipa' -print -quit)"
-
-          if [ -z "$IPA_FILE" ]; then
-            echo "No IPA was generated."
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Runner.app was not found in the Xcode archive."
             exit 1
           fi
 
-          cp "$IPA_FILE" raiko-ios-unsigned.ipa
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/Runner.app
+
+          # An IPA is a ZIP archive with Payload/Runner.app at its root.
+          ditto -c -k --sequesterRsrc --keepParent \
+            Payload raiko-ios-unsigned.ipa
+
+          echo "Created IPA:"
+          ls -lh raiko-ios-unsigned.ipa
+
+          # Verify that the expected app bundle is inside the IPA.
+          unzip -l raiko-ios-unsigned.ipa | grep 'Payload/Runner.app/'
 
       - name: Upload Raiko IPA
         uses: actions/upload-artifact@v4
