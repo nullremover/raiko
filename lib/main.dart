@@ -3,6 +3,7 @@ import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 
 void main() {
@@ -53,6 +54,8 @@ class _RaikoHomeState extends State<RaikoHome> {
   final List<PlatformFile> _tracks = [];
   final Set<String> _likedTracks = {};
   final Map<String, AudioMetadata> _trackMetadata = {};
+
+  static const _iosFolderChannel = MethodChannel('com.raiko.app/ios_folder');
 
   int _selectedTab = 0;
   bool _queueLoaded = false;
@@ -173,41 +176,45 @@ class _RaikoHomeState extends State<RaikoHome> {
             return kIsWeb ? file.bytes != null : file.path != null;
           }));
         }
-            } else if (choice == 'folder') {
+      } else if (choice == 'folder') {
         if (kIsWeb) {
           throw Exception('Folder picking is not supported on the web.');
         }
 
         final directoryPath = await FilePicker.platform.getDirectoryPath();
         if (directoryPath != null) {
-          final directory = Directory(directoryPath);
-          try {
-            final entities = directory.listSync(recursive: true);
+          List<String> filePaths = [];
 
-            for (final entity in entities) {
-              if (entity is File) {
-                try {
-                  final path = entity.path;
-                  final extension = path.split('.').last.toLowerCase();
-                  if (_allowedExtensions.contains(extension)) {
-                    final name = path.split(Platform.pathSeparator).last;
-                    final bytes = await entity.readAsBytes();
-                    collectedFiles.add(
-                      PlatformFile(
-                        name: name,
-                        path: path,
-                        size: bytes.length,
-                        bytes: bytes,
-                      ),
-                    );
-                  }
-                } catch (_) {
-                  // Skip individual files we lack permission to read
-                }
-              }
+          if (Platform.isIOS) {
+            final List<dynamic> paths = await _iosFolderChannel.invokeMethod(
+              'getFolderFiles',
+              {'path': directoryPath},
+            );
+            filePaths = paths.cast<String>();
+          } else {
+            final directory = Directory(directoryPath);
+            filePaths = directory
+                .listSync(recursive: true)
+                .whereType<File>()
+                .map((e) => e.path)
+                .toList();
+          }
+
+          for (final path in filePaths) {
+            final extension = path.split('.').last.toLowerCase();
+            if (_allowedExtensions.contains(extension)) {
+              final file = File(path);
+              final name = path.split(Platform.pathSeparator).last;
+              final bytes = await file.readAsBytes();
+              collectedFiles.add(
+                PlatformFile(
+                  name: name,
+                  path: path,
+                  size: bytes.length,
+                  bytes: bytes,
+                ),
+              );
             }
-          } catch (e) {
-            throw Exception('Cannot read folder (permission denied): $e');
           }
         }
       }
@@ -225,7 +232,6 @@ class _RaikoHomeState extends State<RaikoHome> {
           if (!alreadyAdded) {
             _tracks.add(file);
 
-            // Extract metadata & album art safely using pure Dart!
             if (!kIsWeb && file.path != null) {
               try {
                 final metadata = readMetadata(File(file.path!));
@@ -854,7 +860,7 @@ class _RaikoHomeState extends State<RaikoHome> {
               ),
             ),
             const SizedBox(height: 24),
-                        Container(
+            Container(
               width: desktop ? 290 : 240,
               height: desktop ? 290 : 240,
               decoration: BoxDecoration(
@@ -881,17 +887,10 @@ class _RaikoHomeState extends State<RaikoHome> {
                   if (track != null) {
                     final metadata = _trackMetadata[track.name];
                     if (metadata != null && metadata.pictures.isNotEmpty) {
-                      try {
-                        final picture = metadata.pictures.first;
-                        // audio_metadata_reader cover bytes can be accessed via .bytes
-                        final imageBytes = picture.bytes;
-                        if (imageBytes.isNotEmpty) {
-                          return Image.memory(
-                            imageBytes,
-                            fit: BoxFit.cover,
-                          );
-                        }
-                      } catch (_) {}
+                      return Image.memory(
+                        metadata.pictures.first.bytes,
+                        fit: BoxFit.cover,
+                      );
                     }
                   }
                   return Center(
