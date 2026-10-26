@@ -1,12 +1,24 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:audio_metadata_reader/audio_metadata_reader.dart';
+import 'package:audio_service/audio_service.dart';
+import 'package:just_audio_background/just_audio_background.dart';
+import 'package:just_audio_media_kit/just_audio_media_kit.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  JustAudioMediaKit.ensureInitialized();
+  await JustAudioBackground.init(
+    androidNotificationChannelId: 'dev.nullremover.raiko.playback',
+    androidNotificationChannelName: 'Raiko playback',
+    androidNotificationOngoing: true,
+  );
   runApp(const RaikoApp());
 }
 
@@ -54,10 +66,158 @@ class _RaikoHomeState extends State<RaikoHome> {
   final List<PlatformFile> _tracks = [];
   final Set<String> _likedTracks = {};
   final Map<String, AudioMetadata> _trackMetadata = {};
+  final Set<String> _metadataLoaded = {};
+  bool _shuffleEnabled = false;
+  LoopMode _loopMode = LoopMode.off;
+  static const _libraryPreferenceKey = 'raiko.library.paths.v1';
+  static const _shufflePreferenceKey = 'raiko.shuffle.v1';
+  static const _repeatPreferenceKey = 'raiko.repeat.v1';
+  static const _currentIndexPreferenceKey = 'raiko.current_index.v1';
+  static const _positionPreferenceKey = 'raiko.position_ms.v1';
+  Timer? _persistenceTimer;
 
   static const _iosFolderChannel = MethodChannel('com.raiko.app/ios_folder');
 
   int _selectedTab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreLibrary();
+    _persistenceTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (_queueLoaded) _persistPreferences();
+    });
+  }
+
+  String _trackKey(PlatformFile track) => track.path ?? 'web:${track.name}:${track.size}';
+
+  Future<void> _restoreLibrary() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _shuffleEnabled = prefs.getBool(_shufflePreferenceKey) ?? false;
+      final loopName = prefs.getString(_repeatPreferenceKey) ?? 'off';
+      _loopMode = LoopMode.values.firstWhere((mode) => mode.name == loopName, orElse: () => LoopMode.off);
+      await _player.setShuffleModeEnabled(_shuffleEnabled);
+      await _player.setLoopMode(_loopMode);
+      final savedIndex = prefs.getInt(_currentIndexPreferenceKey) ?? 0;
+      final savedPosition = prefs.getInt(_positionPreferenceKey) ?? 0;
+      final paths = prefs.getStringList(_libraryPreferenceKey) ?? const <String>[];
+      final restored = <PlatformFile>[];
+      for (final path in paths) {
+        if (await File(path).exists()) {
+          final file = File(path);
+          restored.add(PlatformFile(name: path.split(Platform.pathSeparator).last, path: path, size: await file.length()));
+        }
+      }
+      if (restored.isNotEmpty && mounted) {
+        setState(() => _tracks.addAll(restored));
+        await _loadMetadata(restored);
+        await _rebuildPlaylist(autoplay: false, initialIndex: savedIndex);
+        if (savedPosition > 0) await _player.seek(Duration(milliseconds: savedPosition), index: savedIndex.clamp(0, restored.length - 1).toInt());
+      }
+    } catch (error) {
+      debugPrint('Raiko restore failed: $error');
+    }
+  }
+
+  Future<void> _persistPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_shufflePreferenceKey, _shuffleEnabled);
+    await prefs.setString(_repeatPreferenceKey, _loopMode.name);
+    await prefs.setInt(_currentIndexPreferenceKey, _player.currentIndex ?? 0);
+    await prefs.setInt(_positionPreferenceKey, _player.position.inMilliseconds);
+    if (!kIsWeb) {
+      await prefs.setStringList(_libraryPreferenceKey, _tracks.map((t) => t.path).whereType<String>().toList());
+    }
+  }
+
+  Future<void> _loadMetadata(Iterable<PlatformFile> files) async {
+    for (final track in files) {
+      final key = _trackKey(track);
+      if (_metadataLoaded.contains(key)) continue;
+      try {
+        AudioMetadata? metadata;
+        if (!kIsWeb && track.path != null) {
+          metadata = readMetadata(File(track.path!), getImage: true);
+        } else if (track.bytes != null) {
+          // The metadata reader currently reads native files most reliably. Web files
+          // remain playable even if their browser-side metadata cannot be decoded.
+        }
+        if (metadata != null) _trackMetadata[key] = metadata;
+      } catch (error) {
+        debugPrint('Metadata read failed for ${track.name}: $error');
+      } finally {
+        _metadataLoaded.add(key);
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  Uri _trackUri(PlatformFile track) => kIsWeb
+      ? Uri.dataFromBytes(track.bytes!, mimeType: _mimeType(track.name))
+      : Uri.file(track.path!);
+
+  AudioSource _sourceFor(PlatformFile track) {
+    final metadata = _trackMetadata[_trackKey(track)];
+    final artwork = metadata != null && metadata.pictures.isNotEmpty
+        ? Uri.dataFromBytes(metadata.pictures.first.bytes, mimeType: 'image/jpeg')
+        : null;
+    return AudioSource.uri(
+      _trackUri(track),
+      tag: MediaItem(
+        id: _trackKey(track),
+        title: _trackTitle(track),
+        artist: _trackArtist(track),
+        artUri: artwork,
+      ),
+    );
+  }
+
+  Future<void> _rebuildPlaylist({bool autoplay = false, int initialIndex = 0}) async {
+    if (_tracks.isEmpty) {
+      _queueLoaded = false;
+      await _player.stop();
+      return;
+    }
+    final sources = _tracks.map(_sourceFor).toList();
+    final safeIndex = initialIndex.clamp(0, _tracks.length - 1).toInt();
+    await _player.setAudioSources(sources, initialIndex: safeIndex, initialPosition: Duration.zero);
+    _queueLoaded = true;
+    await _player.setShuffleModeEnabled(_shuffleEnabled);
+    await _player.setLoopMode(_loopMode);
+    await _persistPreferences();
+    if (autoplay) await _player.play();
+  }
+
+  Future<void> _removeTrack(int index) async {
+    if (index < 0 || index >= _tracks.length) return;
+    final current = _player.currentIndex ?? 0;
+    setState(() {
+      final removed = _tracks.removeAt(index);
+      _trackMetadata.remove(_trackKey(removed));
+      _metadataLoaded.remove(_trackKey(removed));
+    });
+    if (_tracks.isEmpty) {
+      await _player.stop();
+      _queueLoaded = false;
+    } else {
+      final nextIndex = index < current ? current - 1 : (index == current ? index.clamp(0, _tracks.length - 1).toInt() : current);
+      await _rebuildPlaylist(initialIndex: nextIndex);
+    }
+    await _persistPreferences();
+  }
+
+  Future<void> _toggleShuffle() async {
+    setState(() => _shuffleEnabled = !_shuffleEnabled);
+    await _player.setShuffleModeEnabled(_shuffleEnabled);
+    await _persistPreferences();
+  }
+
+  Future<void> _cycleRepeat() async {
+    setState(() => _loopMode = switch (_loopMode) { LoopMode.off => LoopMode.all, LoopMode.all => LoopMode.one, LoopMode.one => LoopMode.off });
+    await _player.setLoopMode(_loopMode);
+    await _persistPreferences();
+  }
   bool _queueLoaded = false;
   bool _importing = false;
   String? _errorMessage;
@@ -89,7 +249,7 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 
   String _trackTitle(PlatformFile track) {
-    final metadata = _trackMetadata[track.name];
+    final metadata = _trackMetadata[_trackKey(track)];
     if (metadata != null && metadata.title != null && metadata.title!.isNotEmpty) {
       return metadata.title!;
     }
@@ -99,7 +259,7 @@ class _RaikoHomeState extends State<RaikoHome> {
   }
 
   String _trackArtist(PlatformFile track) {
-    final metadata = _trackMetadata[track.name];
+    final metadata = _trackMetadata[_trackKey(track)];
     if (metadata != null && metadata.artist != null && metadata.artist!.isNotEmpty) {
       return metadata.artist!;
     }
@@ -168,7 +328,7 @@ class _RaikoHomeState extends State<RaikoHome> {
           type: FileType.custom,
           allowedExtensions: _allowedExtensions,
           allowMultiple: true,
-          withData: true,
+          withData: kIsWeb,
         );
 
         if (result != null && result.files.isNotEmpty) {
@@ -205,13 +365,11 @@ class _RaikoHomeState extends State<RaikoHome> {
             if (_allowedExtensions.contains(extension)) {
               final file = File(path);
               final name = path.split(Platform.pathSeparator).last;
-              final bytes = await file.readAsBytes();
               collectedFiles.add(
                 PlatformFile(
                   name: name,
                   path: path,
-                  size: bytes.length,
-                  bytes: bytes,
+                  size: await file.length(),
                 ),
               );
             }
@@ -221,56 +379,19 @@ class _RaikoHomeState extends State<RaikoHome> {
 
       if (collectedFiles.isEmpty) return;
 
-      final oldCount = _tracks.length;
-
-      setState(() {
-        for (final file in collectedFiles) {
-          final alreadyAdded = _tracks.any(
-            (track) => track.name == file.name && track.path == file.path,
-          );
-
-          if (!alreadyAdded) {
-            _tracks.add(file);
-
-            if (!kIsWeb && file.path != null) {
-              try {
-                final metadata = readMetadata(
-								  File(file.path!),
-								  getImage: true,
-								);
-                if (mounted) {
-                  setState(() {
-                    _trackMetadata[file.name] = metadata;
-                  });
-                }
-              } catch (_) {}
-            }
-          }
+      final newlyAdded = <PlatformFile>[];
+      for (final file in collectedFiles) {
+        final identity = file.path ?? '${file.name}:${file.size}';
+        final alreadyAdded = _tracks.any((track) => (track.path ?? '${track.name}:${track.size}') == identity);
+        if (!alreadyAdded) {
+          _tracks.add(file);
+          newlyAdded.add(file);
         }
-      });
-
-      if (_tracks.isEmpty) return;
-
-      final sources = _tracks.map((track) {
-        final uri = kIsWeb
-            ? Uri.dataFromBytes(
-                track.bytes!,
-                mimeType: _mimeType(track.name),
-              )
-            : Uri.file(track.path!);
-
-        return AudioSource.uri(uri);
-      }).toList();
-
-      final startIndex = oldCount < _tracks.length ? oldCount : 0;
-
-      await _player.setAudioSources(
-        sources,
-        initialIndex: startIndex,
-        initialPosition: Duration.zero,
-      );
-
-      _queueLoaded = true;
+      }
+      if (newlyAdded.isEmpty) return;
+      if (mounted) setState(() {});
+      await _loadMetadata(newlyAdded);
+      await _rebuildPlaylist(autoplay: false, initialIndex: newlyAdded.isNotEmpty ? _tracks.indexOf(newlyAdded.first) : 0);
 
       if (mounted) {
         setState(() => _selectedTab = 2);
@@ -356,6 +477,7 @@ class _RaikoHomeState extends State<RaikoHome> {
 
   @override
   void dispose() {
+    _persistenceTimer?.cancel();
     _player.dispose();
     super.dispose();
   }
@@ -813,25 +935,21 @@ class _RaikoHomeState extends State<RaikoHome> {
                             Icons.play_arrow_rounded,
                             color: RaikoColors.starlight,
                           )
-                        : IconButton(
-                            tooltip: _likedTracks.contains(_tracks[i].name)
-                                ? 'Unlike'
-                                : 'Like',
-                            onPressed: () {
-                              setState(() {
-                                if (!_likedTracks.add(_tracks[i].name)) {
-                                  _likedTracks.remove(_tracks[i].name);
-                                }
-                              });
-                            },
-                            icon: Icon(
-                              _likedTracks.contains(_tracks[i].name)
-                                  ? Icons.favorite_rounded
-                                  : Icons.favorite_border_rounded,
-                              color: _likedTracks.contains(_tracks[i].name)
-                                  ? RaikoColors.starlight
-                                  : RaikoColors.muted,
-                            ),
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: _likedTracks.contains(_tracks[i].name) ? 'Unlike' : 'Like',
+                                onPressed: () {
+                                  setState(() {
+                                    if (!_likedTracks.add(_tracks[i].name)) _likedTracks.remove(_tracks[i].name);
+                                  });
+                                },
+                                icon: Icon(_likedTracks.contains(_tracks[i].name) ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                                  color: _likedTracks.contains(_tracks[i].name) ? RaikoColors.starlight : RaikoColors.muted),
+                              ),
+                              IconButton(tooltip: 'Remove from queue', onPressed: () => _removeTrack(i), icon: const Icon(Icons.close_rounded, color: RaikoColors.muted)),
+                            ],
                           ),
                   ),
                 ),
@@ -888,7 +1006,7 @@ class _RaikoHomeState extends State<RaikoHome> {
                 borderRadius: BorderRadius.circular(26),
                 child: (() {
                   if (track != null) {
-                    final metadata = _trackMetadata[track.name];
+                    final metadata = _trackMetadata[_trackKey(track)];
                     if (metadata != null && metadata.pictures.isNotEmpty) {
                       return Image.memory(
                         metadata.pictures.first.bytes,
@@ -924,6 +1042,13 @@ class _RaikoHomeState extends State<RaikoHome> {
             ),
             const SizedBox(height: 20),
             _buildSeekBar(),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                IconButton(tooltip: _shuffleEnabled ? 'Shuffle on' : 'Shuffle off', onPressed: _toggleShuffle, icon: Icon(Icons.shuffle_rounded, color: _shuffleEnabled ? RaikoColors.starlight : RaikoColors.muted)),
+                IconButton(tooltip: switch (_loopMode) { LoopMode.off => 'Repeat off', LoopMode.all => 'Repeat all', LoopMode.one => 'Repeat one' }, onPressed: _cycleRepeat, icon: Icon(_loopMode == LoopMode.one ? Icons.repeat_one_rounded : Icons.repeat_rounded, color: _loopMode == LoopMode.off ? RaikoColors.muted : RaikoColors.starlight)),
+              ],
+            ),
             const SizedBox(height: 8),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
