@@ -35,20 +35,33 @@ jobs:
 
       - name: Analyze Raiko
         run: flutter analyze
+      
+      - name: Build iOS IPA
+        run: flutter build ipa --release --no-codesign
 
-      - name: Build iOS Simulator app
-        run: flutter build ios --simulator --release
-
-      - name: Package simulator app
+      - name: Package unsigned IPA for SideStore
         run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            build/ios/iphonesimulator/Runner.app \
-            raiko-ios-simulator.zip
+          set -euo pipefail
 
-      - name: Upload iOS build
+          IPA_PATH="build/ios/ipa"
+
+          echo "Looking for generated IPA..."
+          find "$IPA_PATH" -maxdepth 1 -name '*.ipa' -print
+
+          IPA_FILE="$(find "$IPA_PATH" -maxdepth 1 -name '*.ipa' -print -quit)"
+
+          if [ -z "$IPA_FILE" ]; then
+            echo "No IPA was generated."
+            exit 1
+          fi
+
+          cp "$IPA_FILE" raiko-ios-unsigned.ipa
+
+      - name: Upload Raiko IPA
         uses: actions/upload-artifact@v4
         with:
-          name: raiko-ios-simulator
-          path: raiko-ios-simulator.zip
+          name: raiko-ios-ipa
+          path: raiko-ios-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
+
