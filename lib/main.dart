@@ -160,6 +160,7 @@ class _RaikoHomeState extends State<RaikoHome> {
     );
   }
 
+  
   Widget _navItem(int index) {
     final selected = _selectedTab == index;
 
@@ -168,33 +169,41 @@ class _RaikoHomeState extends State<RaikoHome> {
         horizontal: 12,
         vertical: 3,
       ),
-      child: ListTile(
-        selected: selected,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-        ),
-        selectedTileColor:
-            RaikoColors.cobalt.withValues(alpha: 0.2),
-        leading: Icon(
-          _tabIcon(index),
-          color: selected
-              ? RaikoColors.starlight
-              : RaikoColors.muted,
-        ),
-        title: Text(
-          _tabs[index],
-          style: TextStyle(
-            color: selected
-                ? RaikoColors.text
-                : RaikoColors.muted,
-            fontWeight:
-                selected ? FontWeight.w600 : FontWeight.normal,
+      child: Material(
+        color: selected
+            ? RaikoColors.cobalt.withValues(alpha: 0.2)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: ListTile(
+          selected: selected,
+          selectedTileColor: Colors.transparent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
           ),
+          leading: Icon(
+            _tabIcon(index),
+            color: selected
+                ? RaikoColors.starlight
+                : RaikoColors.muted,
+          ),
+          title: Text(
+            _tabs[index],
+            style: TextStyle(
+              color: selected
+                  ? RaikoColors.text
+                  : RaikoColors.muted,
+              fontWeight: selected
+                  ? FontWeight.w600
+                  : FontWeight.normal,
+            ),
+          ),
+          onTap: () => setState(() => _selectedTab = index),
         ),
-        onTap: () => setState(() => _selectedTab = index),
       ),
     );
   }
+
 
   Widget _buildHeader() {
     return Padding(
