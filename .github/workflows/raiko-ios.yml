@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  ios-simulator:
-    name: Build Raiko for iOS Simulator
+  ios-iphone:
+    name: Build Raiko for iOS(iPhone build)
     runs-on: macos-latest
 
     steps:
