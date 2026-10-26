@@ -97,11 +97,12 @@ class _RaikoHomeState extends State<RaikoHome> {
 
   String _trackArtist(PlatformFile track) {
     final tag = _trackMetadata[track.name];
-    if (tag != null && tag.artist != null && tag.artist!.isNotEmpty) {
-      return tag.artist!;
+    if (tag != null && tag.trackArtist != null && tag.trackArtist!.isNotEmpty) {
+      return tag.trackArtist!;
     }
     return 'Local file';
   }
+
 
   String _formatDuration(Duration? duration) {
     if (duration == null) return '--:--';
@@ -218,9 +219,9 @@ class _RaikoHomeState extends State<RaikoHome> {
           if (!alreadyAdded) {
             _tracks.add(file);
 
-            // Extract metadata asynchronously
+          // Extract metadata asynchronously
             if (!kIsWeb && file.path != null) {
-              Audiotags.readAudioTag(file.path!).then((tag) {
+              AudioTags.read(file.path!).then((tag) {
                 if (tag != null && mounted) {
                   setState(() {
                     _trackMetadata[file.name] = tag;
